@@ -1,0 +1,112 @@
+#! /usr/bin/env bash
+
+# Modify shebang according current enviroment.
+# Strictly use env command, except parser along with option.
+# Otherwise only update to right parser location.
+
+function usage() {
+	cat <<USAGE >&2
+fixShebang [-b ''] [-c ''] [-d] [-s] file1 ...
+
+    -b str    backup file suffix
+    -c file   path config filename
+    -d        turn on debug
+    -s        turn on strict mode (env)
+USAGE
+}
+
+function parseCfg() {
+	sed -r 's/#.*$//; /^\s*$/d' $1 |
+		sed -r 's/^\s+//; s/\s*=\s*/=/' |
+		sed -r 's/^(\S+)=/\[\1\]=/' |
+		sed '1ideclare -A path=(' |
+		sed '$a)'
+}
+
+bck=''
+cfg=''
+debug=0
+strict=0
+while getopts ":b:c:ds" arg; do
+	case $arg in
+		b)
+			bck=$OPTARG
+			;;
+		c)
+			cfg=$OPTARG
+			;;
+		d)
+			debug=1
+			;;
+		s)
+			strict=1
+			;;
+		*)
+			usage
+			exit 1
+			;;
+	esac
+done
+shift $((OPTIND - 1))
+if [ "${#}" == "0" ]; then usage; exit 1; fi
+if [ ! -z "$cfg" -a -r "$cfg" ]; then
+	source <(parseCfg $cfg)
+else
+	declare -A path
+fi
+
+function getpath() {
+	if [ -z "${path[$1]}" ]; then
+		path[$1]=$(whereis -b $1 |awk '{print $2}')
+	fi
+	echo ${path[$1]}
+}
+path[env]=$(getpath env)
+
+function warn() { f=$1; shift 1; echo "[$f]" $@ >&2; }
+function debug() { if [ "$debug" == "1" ]; then warn $*; fi }
+function fix1() {
+	file $1 |grep -qP 'script, .+ text'
+	if [ "$?" != "0" ]; then
+		warn $1 not a script
+		return 1
+	fi
+	h=$(echo $(head -n 1 $1))
+	if [ "${h:0:2}" != "#!" ]; then
+		warn $1 no shebang detected
+		return 2
+	fi
+	h="/${h#*/}"
+	parser=${h%% *}
+	short=${parser##*/}
+	opt=$(echo ${h#$parser})
+	if [ "$short" == "env" ]; then
+		if [ -z "$opt" ]; then warn $1 no parser detected; fi
+		echo "$opt" |grep -q ' '
+		if [ "$?" == 0 ]; then warn $1 env does not support parser option; fi
+	fi
+	debug $1 before: $h
+	if [ "$strict" == "1" ]; then
+		if [ "$short" != "env" ]; then
+			if [ ! -z "$opt" ]; then
+				if [ ! -x $parser ]; then
+					pp=$(getpath $short)
+					debug $1 after: $pp $opt
+					sed -r -i$bck "1s|^.*$|#! $pp $opt|" $1
+				fi
+			else
+				debug $1 after: ${path[env]} $short
+				sed -r -i$bck "1s|^.*$|#! ${path[env]} $short|" $1
+			fi
+		else
+			debug $1 after: ${path[env]} $opt
+			sed -r -i$bck "1s|^.*$|#! ${path[env]} $opt|" $1
+		fi
+	elif [ ! -x $parser ]; then
+		pp=$(getpath $short)
+		debug $1 after: $pp $opt
+		sed -r -i$bck "1s|^.*$|#! $pp $opt|" $1
+	fi
+}
+
+for f in $*; do fix1 $f; done
